@@ -1,10 +1,10 @@
 import { Fragment, useEffect, useMemo, useState, type ChangeEvent } from 'react'
 import {
-  closeCase,
   deleteKbDocument,
   getCase,
   listCases,
   retryKbDocument,
+  updateCaseStatus,
   uploadKbDocumentForm,
 } from '../lib/api'
 import { formatCallerPhone } from '../lib/phone'
@@ -97,8 +97,8 @@ export function AdminConsole({
   const [cityFilter, setCityFilter] = useState('all')
   const [cases, setCases] = useState<CaseRecord[]>([])
   const [selectedCase, setSelectedCase] = useState<CaseRecord | null>(null)
-  const [firstResponderEmailByCase, setFirstResponderEmailByCase] = useState<Record<string, string>>({})
-  const [closingCaseId, setClosingCaseId] = useState<string | null>(null)
+  const [statusDraftByCase, setStatusDraftByCase] = useState<Record<string, string>>({})
+  const [updatingCaseId, setUpdatingCaseId] = useState<string | null>(null)
   const [previewImageSrc, setPreviewImageSrc] = useState<string | null>(null)
   const [isLoadingCases, setIsLoadingCases] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
@@ -123,7 +123,14 @@ export function AdminConsole({
     return Array.from(values).sort((a, b) => a.localeCompare(b))
   }, [cases])
 
-  const statusOptions = ['open', 'triaged', 'guidance_provided', 'closed'] as const
+  const statusOptions = [
+    'open',
+    'triaged',
+    'guidance_provided',
+    'rescue_onway',
+    'rescue_complete',
+    'closed',
+  ] as const
 
   const filteredCases = useMemo(() => {
     return cases.filter((item) => {
@@ -219,18 +226,20 @@ export function AdminConsole({
     }
   }
 
-  const closeSelectedCase = async (caseRecord: CaseRecord) => {
+  const changeSelectedCaseStatus = async (caseRecord: CaseRecord) => {
     setError(null)
-    setClosingCaseId(caseRecord.id)
+    setUpdatingCaseId(caseRecord.id)
     try {
-      const updated = await closeCase(caseRecord.id)
+      const nextStatus = statusDraftByCase[caseRecord.id] ?? caseRecord.status
+      const updated = await updateCaseStatus(caseRecord.id, nextStatus)
       setSelectedCase(updated)
       setCases((current) => current.map((item) => (item.id === updated.id ? updated : item)))
+      setStatusDraftByCase((current) => ({ ...current, [caseRecord.id]: updated.status }))
     } catch (caughtError: unknown) {
-      const message = caughtError instanceof Error ? caughtError.message : 'Close case failed.'
+      const message = caughtError instanceof Error ? caughtError.message : 'Status update failed.'
       setError(message)
     } finally {
-      setClosingCaseId(null)
+      setUpdatingCaseId(null)
     }
   }
 
@@ -401,59 +410,34 @@ export function AdminConsole({
                       <div className="rounded-xl border border-white/10 bg-black/10 p-3 text-xs text-blue-100/80">
                         <div className="space-y-3">
                           <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_auto_auto]">
-                            <input
-                              value={firstResponderEmailByCase[selectedCase.id] ?? ''}
+                            <p className="rounded-lg border border-accent/40 bg-accent px-3 py-2 text-sm font-bold text-white">
+                              Rescue team notified
+                            </p>
+                            <select
+                              value={statusDraftByCase[selectedCase.id] ?? selectedCase.status}
                               onChange={(event) =>
-                                setFirstResponderEmailByCase((current) => ({
+                                setStatusDraftByCase((current) => ({
                                   ...current,
                                   [selectedCase.id]: event.target.value,
                                 }))
                               }
-                              placeholder="first.responder@example.org"
-                              className="w-full rounded-lg border border-white/15 bg-black/10 px-3 py-2 text-xs text-white placeholder:text-blue-100/40"
-                            />
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const recipient = firstResponderEmailByCase[selectedCase.id]?.trim() ?? ''
-                                if (!recipient) {
-                                  setError('Please enter first responder email.')
-                                  return
-                                }
-
-                                const subject = encodeURIComponent(
-                                  `Case Handoff: ${caseDisplayLabel(selectedCase)}`,
-                                )
-                                const body = encodeURIComponent(
-                                  [
-                                    `Case: ${caseDisplayLabel(selectedCase)}`,
-                                    `Status: ${selectedCase.status}`,
-                                    `Caller: ${selectedCase.callerName ?? 'N/A'}`,
-                                    `Phone: ${selectedCase.callerPhone ?? 'N/A'}`,
-                                    `Injury: ${selectedCase.injury ?? 'N/A'}`,
-                                    `Aggression: ${selectedCase.aggression ?? 'N/A'}`,
-                                    `Recommended Action: ${selectedCase.context.recommendedAction ?? 'N/A'}`,
-                                  ].join('\n'),
-                                )
-                                window.location.href = `mailto:${recipient}?subject=${subject}&body=${body}`
-                              }}
-                              className="rounded-lg border border-white/20 px-3 py-2 text-xs text-white transition hover:bg-white/10"
+                              className="rounded-lg border border-white/15 bg-black/10 px-3 py-2 text-xs text-white"
                             >
-                              Email First Responder
-                            </button>
+                              {statusOptions.map((status) => (
+                                <option key={status} value={status}>
+                                  {status}
+                                </option>
+                              ))}
+                            </select>
                             <button
                               type="button"
                               onClick={() => {
-                                void closeSelectedCase(selectedCase)
+                                void changeSelectedCaseStatus(selectedCase)
                               }}
-                              disabled={closingCaseId === selectedCase.id || selectedCase.status === 'closed'}
+                              disabled={updatingCaseId === selectedCase.id}
                               className="rounded-lg bg-accent px-3 py-2 text-xs font-semibold text-white transition hover:brightness-110 disabled:opacity-60"
                             >
-                              {closingCaseId === selectedCase.id
-                                ? 'Closing...'
-                                : selectedCase.status === 'closed'
-                                  ? 'Case Closed'
-                                  : 'Close Case'}
+                              {updatingCaseId === selectedCase.id ? 'Updating...' : 'Change State'}
                             </button>
                           </div>
 

@@ -44,7 +44,12 @@ export interface CaseRecord {
   callerName: string | null
   callerPhone: string | null
   city: string | null
+  state?: string | null
   zip: string | null
+  country?: string | null
+  locationSource?: string | null
+  locationConfidence?: number | null
+  locationUpdatedAt?: string | null
   animal: string | null
   location: string | null
   injury: string | null
@@ -84,7 +89,9 @@ export interface IntakePatch {
   callerName?: string
   callerPhone?: string
   city?: string
+  state?: string
   zip?: string
+  country?: string
   animal?: string
   location?: string
   injury?: string
@@ -97,6 +104,18 @@ export interface TokenResponse {
   url: string
   room: string
   caseId?: string
+}
+
+export interface TokenLocationMetadata {
+  telephony?: {
+    city?: string
+    state?: string
+    zip?: string
+    country?: string
+  }
+  numberLookup?: Record<string, unknown>
+  callMetadata?: Record<string, unknown>
+  providerMetadata?: Record<string, unknown>
 }
 
 export interface RecommendationsResponse {

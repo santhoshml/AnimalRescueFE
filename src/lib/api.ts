@@ -4,10 +4,12 @@ import type {
   IntakePatch,
   KbDocument,
   RecommendationsResponse,
+  TokenLocationMetadata,
   TokenResponse,
 } from '../types/rescue'
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3001'
+const AGENT_DISPATCH_PATH = import.meta.env.VITE_AGENT_DISPATCH_PATH ?? '/agent/dispatch'
 
 async function parseOrThrow<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -192,11 +194,32 @@ export async function closeCase(caseId: string): Promise<CaseRecord> {
   return parseOrThrow<CaseRecord>(response)
 }
 
-export async function getLiveKitToken(room: string, identity: string, caseId: string): Promise<TokenResponse> {
+export async function updateCaseStatus(caseId: string, status: string): Promise<CaseRecord> {
+  const response = await fetch(`${BASE_URL}/cases/${caseId}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  })
+
+  return parseOrThrow<CaseRecord>(response)
+}
+
+export async function getLiveKitToken(
+  room: string,
+  identity: string,
+  caseId: string,
+  metadata?: TokenLocationMetadata,
+): Promise<TokenResponse> {
+  const body = {
+    room,
+    identity,
+    caseId,
+    ...(metadata ?? {}),
+  }
   const response = await fetch(`${BASE_URL}/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ room, identity, caseId }),
+    body: JSON.stringify(body),
   })
 
   return parseOrThrow<TokenResponse>(response)
@@ -208,4 +231,21 @@ export function eventUrl(caseId: string): string {
 
 export function kbEventUrl(): string {
   return `${BASE_URL}/events/kb`
+}
+
+export async function dispatchVoiceAgent(payload: {
+  room: string
+  identity: string
+  caseId: string
+}): Promise<void> {
+  const response = await fetch(`${BASE_URL}${AGENT_DISPATCH_PATH}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+
+  if (!response.ok) {
+    const raw = await response.text()
+    throw new Error(raw || `Dispatch failed (${response.status})`)
+  }
 }

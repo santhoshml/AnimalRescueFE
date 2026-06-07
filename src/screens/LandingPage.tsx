@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, type ChangeEvent } from 'react'
-import { analyzeCase, patchIntake, uploadImage } from '../lib/api'
+import { analyzeCase, eventUrl, getCase, uploadImage } from '../lib/api'
 import { formatCallerPhone } from '../lib/phone'
 import { LiveKitVoicePanel } from '../components/voice/LiveKitVoicePanel'
 import { Card } from '../components/ui/Card'
 import heroImage from '../assets/hero.png'
 import type { CaseFormInput, CaseRecord } from '../types/rescue'
+
+type AnalyzeReason = 'disconnect_auto' | 'manual_click'
+const FINAL_GOODBYE_LINE = 'Thank you! Have a great day and Goodbye'
 
 function normalizeImageItem(image: CaseRecord['images'][number], index: number) {
   if (typeof image === 'string') {
@@ -32,12 +35,38 @@ export function LandingPage({
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [isUploadingImage, setIsUploadingImage] = useState(false)
   const [isStarting, setIsStarting] = useState(false)
+  const [endCallSignal, setEndCallSignal] = useState(0)
+  const [endCallReason, setEndCallReason] = useState('agent_final_message')
   const [error, setError] = useState<string | null>(null)
   const wasVoiceConnectedRef = useRef(false)
+  const hasEndedCallByCaseRef = useRef<Record<string, boolean>>({})
+  const analyzeInFlightByCaseRef = useRef<Record<string, boolean>>({})
+  const autoAnalyzeDoneByCaseRef = useRef<Record<string, boolean>>({})
+  const lastIntakeSignatureByCaseRef = useRef<Record<string, string>>({})
+  const lastIncompleteSignatureByCaseRef = useRef<Record<string, string>>({})
 
   useEffect(() => {
     setCaseRecord(activeCase)
+    if (activeCase?.id) {
+      hasEndedCallByCaseRef.current[activeCase.id] = false
+    }
   }, [activeCase])
+
+  const caseHasFinalGoodbye = (record: CaseRecord) => {
+    return record.transcript.some((entry) => {
+      const text = typeof entry === 'string' ? entry : entry.text
+      return (text ?? '').includes(FINAL_GOODBYE_LINE)
+    })
+  }
+
+  const triggerCallEnd = (reason: string, record: CaseRecord) => {
+    if (hasEndedCallByCaseRef.current[record.id]) {
+      return
+    }
+    hasEndedCallByCaseRef.current[record.id] = true
+    setEndCallReason(reason)
+    setEndCallSignal((current) => current + 1)
+  }
 
   useEffect(() => {
     if (!caseRecord) {
@@ -71,20 +100,129 @@ export function LandingPage({
     }
   }
 
-  const runAnalysis = async () => {
+  const intakePresence = (record: CaseRecord) => {
+    const animal = Boolean(record.animal?.trim())
+    const injury = Boolean(record.injury?.trim())
+    const aggression = Boolean(record.aggression?.trim())
+    const location = Boolean(record.location?.trim() || record.city?.trim() || record.zip?.trim())
+    const transcript = Boolean(
+      record.transcript.some((entry) => (typeof entry === 'string' ? entry.trim() : entry.text?.trim())),
+    )
+
+    return { animal, injury, aggression, location, transcript }
+  }
+
+  const intakeSignature = (record: CaseRecord) => {
+    const p = intakePresence(record)
+    return `${record.animal ?? ''}|${record.injury ?? ''}|${record.aggression ?? ''}|${record.location ?? ''}|${record.city ?? ''}|${record.zip ?? ''}|${record.transcript.length}|${p.animal ? 1 : 0}${p.injury ? 1 : 0}${p.aggression ? 1 : 0}${p.location ? 1 : 0}${p.transcript ? 1 : 0}`
+  }
+
+  const hasMinimumIntake = (record: CaseRecord) => {
+    const p = intakePresence(record)
+    return p.animal || p.injury || p.aggression || p.location || p.transcript
+  }
+
+  const isIncompleteGuardError = (message: string) => {
+    const upper = message.toUpperCase()
+    return upper.includes('CASE_INTAKE_INCOMPLETE') || upper.includes('INTAKE_INCOMPLETE')
+  }
+
+  const runAnalysis = async (reason: AnalyzeReason) => {
     if (!caseRecord) {
+      console.debug('ANALYZE_BLOCKED', {
+        caseId: null,
+        reason,
+        blockReason: 'missing_case_record',
+      })
+      return
+    }
+
+    const caseId = caseRecord.id
+    const signature = intakeSignature(caseRecord)
+    lastIntakeSignatureByCaseRef.current[caseId] = signature
+    const presence = intakePresence(caseRecord)
+    const minimumIntake = hasMinimumIntake(caseRecord)
+    const isManual = reason === 'manual_click'
+    const allowedReason = reason === 'disconnect_auto' || reason === 'manual_click'
+
+    if (!allowedReason) {
+      console.debug('ANALYZE_BLOCKED', {
+        caseId,
+        reason,
+        blockReason: 'invalid_reason',
+      })
+      return
+    }
+
+    console.debug('ANALYZE_ATTEMPT', {
+      caseId,
+      reason,
+      sourceComponent: 'LandingPage',
+      hasTranscript: presence.transcript,
+      hasAnimal: presence.animal,
+      hasInjury: presence.injury,
+      hasAggression: presence.aggression,
+      hasLocation: presence.location,
+    })
+
+    if (!isManual && !minimumIntake) {
+      console.debug('ANALYZE_BLOCKED', {
+        caseId,
+        reason,
+        blockReason: 'minimum_intake_not_met',
+      })
+      return
+    }
+
+    if (!isManual && autoAnalyzeDoneByCaseRef.current[caseId]) {
+      console.debug('ANALYZE_BLOCKED', {
+        caseId,
+        reason,
+        blockReason: 'auto_analyze_already_done',
+      })
+      return
+    }
+
+    if (analyzeInFlightByCaseRef.current[caseId]) {
+      console.debug('ANALYZE_BLOCKED', {
+        caseId,
+        reason,
+        blockReason: 'analyze_in_flight',
+      })
+      return
+    }
+
+    if (!isManual && lastIncompleteSignatureByCaseRef.current[caseId] === signature) {
+      console.debug('ANALYZE_BLOCKED', {
+        caseId,
+        reason,
+        blockReason: 'intake_signature_already_marked_incomplete',
+      })
       return
     }
 
     setError(null)
     setIsAnalyzing(true)
+    analyzeInFlightByCaseRef.current[caseId] = true
     try {
-      const analyzed = await analyzeCase(caseRecord.id)
+      const analyzed = await analyzeCase(caseId)
       setCaseRecord(analyzed)
+      autoAnalyzeDoneByCaseRef.current[caseId] = true
+      delete lastIncompleteSignatureByCaseRef.current[caseId]
     } catch (caughtError: unknown) {
       const message = caughtError instanceof Error ? caughtError.message : 'Unable to generate instructions.'
-      setError(message)
+      if (isIncompleteGuardError(message)) {
+        console.debug('ANALYZE_BLOCKED', {
+          caseId,
+          reason,
+          blockReason: 'CASE_INTAKE_INCOMPLETE',
+        })
+        lastIncompleteSignatureByCaseRef.current[caseId] = signature
+      } else {
+        setError(message)
+      }
     } finally {
+      analyzeInFlightByCaseRef.current[caseId] = false
       setIsAnalyzing(false)
     }
   }
@@ -111,13 +249,76 @@ export function LandingPage({
 
   useEffect(() => {
     if (wasVoiceConnectedRef.current && !voiceConnected) {
-      void runAnalysis()
+      void runAnalysis('disconnect_auto')
     }
     wasVoiceConnectedRef.current = voiceConnected
-  }, [voiceConnected])
+  }, [voiceConnected, caseRecord?.id, caseRecord?.animal, caseRecord?.injury, caseRecord?.aggression, caseRecord?.location, caseRecord?.city, caseRecord?.zip, caseRecord?.transcript.length])
+
+  useEffect(() => {
+    if (!caseRecord?.id) {
+      return
+    }
+
+    const source = new EventSource(eventUrl(caseRecord.id))
+    source.addEventListener('session_complete', () => {
+      void getCase(caseRecord.id).then((latest) => {
+        setCaseRecord(latest)
+        triggerCallEnd('session_complete', latest)
+      })
+    })
+    source.addEventListener('agent_final_message', () => {
+      void getCase(caseRecord.id).then((latest) => {
+        setCaseRecord(latest)
+        triggerCallEnd('agent_final_message', latest)
+      })
+    })
+    source.addEventListener('case.updated', () => {
+      void getCase(caseRecord.id).then((latest) => {
+        setCaseRecord(latest)
+        if (caseHasFinalGoodbye(latest)) {
+          triggerCallEnd('agent_final_message_fallback', latest)
+        }
+      })
+    })
+    source.addEventListener('case.transcript.updated', () => {
+      void getCase(caseRecord.id).then((latest) => {
+        setCaseRecord(latest)
+        if (caseHasFinalGoodbye(latest)) {
+          triggerCallEnd('agent_final_message_fallback', latest)
+        }
+      })
+    })
+    source.addEventListener('case.location.updated', () => {
+      void getCase(caseRecord.id).then((latest) => {
+        setCaseRecord(latest)
+        if (caseHasFinalGoodbye(latest)) {
+          triggerCallEnd('agent_final_message_fallback', latest)
+        }
+      })
+    })
+    source.onerror = () => {
+      source.close()
+    }
+
+    return () => {
+      source.close()
+    }
+  }, [caseRecord?.id])
 
   const steps = caseRecord?.guidanceSteps.slice(0, 5) ?? []
   const hasInstructions = steps.length > 0 || Boolean(caseRecord?.context.recommendedAction)
+
+  const tokenTelephony =
+    caseRecord && (caseRecord.city || caseRecord.state || caseRecord.zip || caseRecord.country)
+      ? {
+          telephony: {
+            city: caseRecord.city ?? undefined,
+            state: caseRecord.state ?? undefined,
+            zip: caseRecord.zip ?? undefined,
+            country: caseRecord.country ?? undefined,
+          },
+        }
+      : undefined
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-6xl items-center px-6 py-12">
@@ -140,7 +341,8 @@ export function LandingPage({
               <span className="rounded-full border border-white/15 px-3 py-1">LiveKit Voice</span>
               <span className="rounded-full border border-white/15 px-3 py-1">Qwen Reasoning</span>
               <span className="rounded-full border border-white/15 px-3 py-1">Unsiloed Retrieval</span>
-              <span className="rounded-full border border-white/15 px-3 py-1">TrueFoundry Agents</span>
+              <span className="rounded-full border border-white/15 px-3 py-1">MiniMax</span>
+              <span className="rounded-full border border-white/15 px-3 py-1">MOSS</span>
             </div>
 
           </div>
@@ -155,32 +357,27 @@ export function LandingPage({
                   onConnectionChange={setVoiceConnected}
                   startLabel="Start Recording"
                   stopLabel="Stop Recording"
-                  callerPhone={caseRecord.callerPhone}
-                  requirePhoneConfirmation
-                  onPhoneConfirm={async (nextPhone, wasCorrected) => {
-                    const raw = caseRecord.callerPhone ?? ''
-                    const formatted = formatCallerPhone(nextPhone || raw)
-                    console.debug('[caller-phone] confirm', {
-                      caseId: caseRecord.id,
-                      rawCallerPhone: raw,
-                      formattedDisplay: formatted,
-                      userCorrected: wasCorrected,
-                    })
-
-                    if (wasCorrected) {
-                      const updated = await patchIntake(caseRecord.id, { callerPhone: nextPhone })
-                      setCaseRecord(updated)
-                    }
-                  }}
+                  tokenMetadata={tokenTelephony}
+                  endCallSignal={endCallSignal}
+                  endCallReason={endCallReason}
                 />
 
                 <Card title="Upload Image">
                   <label className="flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-white/25 bg-black/10 px-4 py-6 text-center transition hover:border-accent">
-                    <span className="text-sm font-medium text-white">
+                    <span className="flex items-center gap-2 text-sm font-medium text-white">
+                      {isUploadingImage ? (
+                        <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-blue-200/40 border-t-blue-200" />
+                      ) : null}
                       {isUploadingImage ? 'Uploading image...' : 'Upload animal image'}
                     </span>
                     <span className="mt-1 text-xs text-blue-100/70">image/*</span>
-                    <input type="file" accept="image/*" className="sr-only" onChange={uploadImageFile} />
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="sr-only"
+                      disabled={isUploadingImage}
+                      onChange={uploadImageFile}
+                    />
                   </label>
 
                   {isAnalyzing ? <p className="mt-3 text-sm text-blue-100/70">Analyzing your recording...</p> : null}
@@ -242,6 +439,18 @@ export function LandingPage({
         {caseRecord && (isAnalyzing || hasInstructions) ? (
           <div className="mt-8">
             <Card title="High-Level Instructions" subtitle="Generated after your voice report">
+              <div className="mb-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void runAnalysis('manual_click')
+                  }}
+                  disabled={isAnalyzing}
+                  className="rounded-lg border border-white/20 px-3 py-2 text-xs text-white transition hover:bg-white/10 disabled:opacity-70"
+                >
+                  {isAnalyzing ? 'Analyzing...' : 'Analyze now'}
+                </button>
+              </div>
               {isAnalyzing ? <p className="text-sm text-blue-100/70">Analyzing your recording...</p> : null}
 
               {!isAnalyzing && steps.length ? (
