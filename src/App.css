@@ -1,0 +1,70 @@
+.rescue-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(circle at top, #f6fbff, #e9f2ff 60%, #dceaff);
+}
+
+.rescue-card {
+  width: min(460px, 100%);
+  background: #ffffff;
+  border: 1px solid #d6e5ff;
+  border-radius: 16px;
+  box-shadow: 0 14px 40px rgba(18, 56, 120, 0.12);
+  padding: 28px;
+  text-align: center;
+}
+
+.rescue-card h1 {
+  margin: 0;
+  font-size: 2rem;
+  color: #0f2f66;
+}
+
+.subtitle {
+  margin: 10px 0 24px;
+  color: #38598a;
+}
+
+.primary-button,
+.secondary-button {
+  width: 100%;
+  border: 0;
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.primary-button {
+  background: #0d4bd8;
+  color: #ffffff;
+}
+
+.primary-button:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.secondary-button {
+  background: #e4ecff;
+  color: #12366f;
+}
+
+.status {
+  margin: 16px 0 0;
+  color: #244879;
+}
+
+.error {
+  margin: 10px 0 0;
+  color: #bd1e33;
+}
+
+.livekit-room {
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
